@@ -34,7 +34,7 @@ from lib.utils.utils import load_pretrain
 # =============================================================================
 
 SNAPSHOT    = "../snapshot/LightTrackM/LightTrackM.pth"   # path to checkpoint
-OUTPUT      = "../snapshot/LightTrackM/lighttrack_siamese.onnx"  # where to save
+OUTPUT      = "../snapshot/LightTrackM/lighttrack_Toast.onnx"  # where to save
 
 # Architecture — matches the published LightTrackM checkpoint
 PATH_NAME   = "back_04502514044521042540+cls_211000022+reg_100000111_ops_32"
@@ -138,12 +138,13 @@ def export(model: LightTrackSiamese):
         model,
         (dummy_template, dummy_search),
         OUTPUT,
-        opset_version=18,
+        opset_version=13,
         input_names=["template", "search"],
         output_names=["cls", "reg"],
         dynamic_axes=None,         # fully static shapes — required for Hailo
         do_constant_folding=True,  # bakes BN + pool kernel sizes into graph
         verbose=False,
+        dynamo=False
     )
     size_mb = os.path.getsize(OUTPUT) / 1024 / 1024
     print(f"      Saved ({size_mb:.1f} MB) -> {OUTPUT}")
