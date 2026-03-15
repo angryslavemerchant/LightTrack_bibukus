@@ -24,7 +24,7 @@ def pixel_corr_mat(z, x):
     Pixel-wise correlation via elementwise multiply + reduce sum + concat tree.
     Hailo-compatible replacement for matmul-based correlation.
 
-    ai wrote most of this, but i wanted to say fk it we ball.
+    Long way round matmul function.
 
     All ops used:
         - Slice (static coords per iteration)
