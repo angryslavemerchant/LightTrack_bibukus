@@ -12,7 +12,7 @@ import onnx
 
 # ── EDIT THIS ─────────────────────────────────────────────────────────────────
 ONNX_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                         "snapshot/LightTrackM/lighttrack_Toast.onnx")
+                         "snapshot/LightTrackM/lighttrack_ToastS.onnx")
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Hailo-8 supported ops (from Hailo Model Zoo / Dataflow Compiler docs)

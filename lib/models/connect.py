@@ -22,22 +22,22 @@ def pixel_corr(z, x):
 def pixel_corr_mat(z, x):
     """
     Pixel-wise correlation via matrix multiplication.
-    All spatial dimensions are hardcoded for Hailo static graph export.
+    Batch dimension is squeezed out for a 2D matmul — simpler for Hailo.
+    torch.flatten used over view() — exports as Flatten op rather than Reshape in ONNX.
 
-    edited from -1 channels
     Assumptions:
-        search_size=256, template_size=128, stride=16
-        → z: [B, C, 8, 8]   → Hz*Wz = 64
-        → x: [B, C, 16, 16] → Hx*Wx = 256
+        search_size=256, template_size=128, stride=16, batch=1
+        → z: [1, C, 8, 8]   → Hz*Wz = 64
+        → x: [1, C, 16, 16] → Hx*Wx = 256
 
     If stride=8 is used instead:
-        → z: [B, C, 16, 16] → Hz*Wz = 256
-        → x: [B, C, 32, 32] → Hx*Wx = 1024, output: (B, 256, 32, 32)
+        → z: [1, C, 16, 16] → Hz*Wz = 256
+        → x: [1, C, 32, 32] → Hx*Wx = 1024, output: (1, 256, 32, 32)
     """
-    b, c, h, w = x.size()
-    z_mat = z.view((b, c, 64)).transpose(1, 2)  # (b, hz * wz, c)
-    x_mat = x.view((b, c, 256))  # (b, c, hx * wx)
-    return torch.matmul(z_mat, x_mat).view((b, 64, h, w))  # (b, hz * wz, hx * wx) --> (b, hz * wz, hx, wx)
+    z_mat = torch.flatten(z.squeeze(0), start_dim=1).t()  # (64, C)
+    x_mat = torch.flatten(x.squeeze(0), start_dim=1)      # (C, 256)
+    out   = torch.matmul(z_mat, x_mat)                    # (64, 256)
+    return out.view(1, 64, 16, 16)                         # (1, 64, 16, 16)
 
 
 class CAModule(nn.Module):
