@@ -21,23 +21,51 @@ def pixel_corr(z, x):
 
 def pixel_corr_mat(z, x):
     """
-    Pixel-wise correlation via matrix multiplication.
-    Batch dimension is squeezed out for a 2D matmul — simpler for Hailo.
-    torch.flatten used over view() — exports as Flatten op rather than Reshape in ONNX.
+    Pixel-wise correlation via elementwise multiply + reduce sum + concat tree.
+    Hailo-compatible replacement for matmul-based correlation.
+
+    ai wrote most of this, but i wanted to say fk it we ball.
+
+    All ops used:
+        - Slice (static coords per iteration)
+        - Elementwise multiply [N,C,1,1] x [N,C,H,W]
+        - Reduce Sum over channel dim
+        - Concat (max 4 inputs, tree structure)
 
     Assumptions:
-        search_size=256, template_size=128, stride=16, batch=1
-        → z: [1, C, 8, 8]   → Hz*Wz = 64
-        → x: [1, C, 16, 16] → Hx*Wx = 256
-
-    If stride=8 is used instead:
-        → z: [1, C, 16, 16] → Hz*Wz = 256
-        → x: [1, C, 32, 32] → Hx*Wx = 1024, output: (1, 256, 32, 32)
+        search_size=256, template_size=128, stride=16
+        → z: [B, C, 8, 8]   → Hz*Wz = 64
+        → x: [B, C, 16, 16]
+        → output: [B, 64, 16, 16]
     """
-    z_mat = torch.flatten(z.squeeze(0), start_dim=1).t()  # (64, C)
-    x_mat = torch.flatten(x.squeeze(0), start_dim=1)      # (C, 256)
-    out   = torch.matmul(z_mat, x_mat)                    # (64, 256)
-    return out.view(1, 64, 16, 16)                         # (1, 64, 16, 16)
+    b, c, hx, wx = x.size()
+    hz, wz = z.size(2), z.size(3)
+
+    # For each of the 64 template positions, compute dot product with all of x
+    # z_ij: (B, C, 1, 1) x x: (B, C, 16, 16) → (B, C, 16, 16) → sum → (B, 1, 16, 16)
+    scores = []
+    for i in range(hz):
+        for j in range(wz):
+            z_ij = z[:, :, i:i+1, j:j+1]              # (B, C, 1, 1) — static slice
+            prod  = z_ij * x                            # (B, C, 16, 16) — elementwise broadcast
+            score = prod.sum(dim=1, keepdim=True)       # (B, 1, 16, 16) — reduce over C
+            scores.append(score)
+
+    # Concat tree — Hailo supports max 4 inputs per concat op
+    # 64 scores → 16 groups of 4 → 4 groups of 4 → 1
+    def concat_tree(tensors, dim):
+        while len(tensors) > 1:
+            tensors = [
+                torch.cat(tensors[i:i+4], dim=dim)
+                for i in range(0, len(tensors), 4)
+            ]
+        return tensors[0]
+
+    return concat_tree(scores, dim=1)   # (B, 64, 16, 16)
+    b, c, h, w = x.size()
+    z_mat = z.view((b, c, 64)).transpose(1, 2)  # (b, hz * wz, c)
+    x_mat = x.view((b, c, 256))  # (b, c, hx * wx)
+    return torch.matmul(z_mat, x_mat).view((b, 64, h, w))  # (b, hz * wz, hx * wx) --> (b, hz * wz, hx, wx)
 
 
 class CAModule(nn.Module):
