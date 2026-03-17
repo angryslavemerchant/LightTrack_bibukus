@@ -16,3 +16,4 @@ ultralytics-thop~=2.0.18
 onnxsim~=0.4.36
 ultralytics~=8.4.14
 torchvision~=0.25.0
+livelossplot
