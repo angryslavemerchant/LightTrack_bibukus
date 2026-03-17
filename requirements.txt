@@ -1,7 +1,7 @@
 numpy~=2.4.2
 sounddevice~=0.5.5
 requests~=2.32.5
-torch~=2.10.0+cu130
+
 pyyaml~=6.0.3
 opencv-python~=4.13.0.92
 shapely~=2.1.2
@@ -15,4 +15,4 @@ onnx~=1.20.1
 ultralytics-thop~=2.0.18
 onnxsim~=0.4.36
 ultralytics~=8.4.14
-torchvision~=0.25.0+cu130
+torchvision~=0.25.0
