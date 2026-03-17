@@ -1,19 +1,17 @@
 """
-tracking/distill_xattn.py
+tracking/distill_xattnRemote.py
 
-Distillation training: pixel_corr_mat (teacher) → xattn (student).
+End-to-end output-level distillation: full model with pixel_corr_mat (teacher)
+→ full model with xattn (student).
 
-Both teacher and student share the same frozen backbone + neck from a
-pretrained LightTrackM checkpoint. Only the student's xattn layers train.
+Frozen in both: backbone + neck (computed once, shared).
+Trainable in student: feature_fusor (xattn pw_corr + adj_layer) + head (cls/reg towers).
 
-Cut points (both (B, 64, 16, 16), before CA):
-  Teacher: pixel_corr_mat(zf_bn, xf_bn)          — raw dot-product correlation
-  Student: post_dw(chan_proj(mha_out_reshaped))   — after the final 128→64 contraction
-
-Loss: MSE between teacher and student outputs at the cut point.
+Loss: MSE(s_cls, t_cls) + MSE(s_reg, t_reg)  — output level so towers adapt
+freely to xattn features rather than trying to invert the softmax.
 
 Dataset is assumed to be pre-curated: two folders of aligned crops
-(see prepare_coco_patches.py). DataLoader is imported from coco_patches_loader.py.
+(see prepare_coco_patches.py). DataLoader is imported from coco_patches_loaderRemote.py.
 """
 
 import os
@@ -29,7 +27,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import _init_paths  # noqa
 
 from lib.models.models import LightTrackM_Speed
-from lib.models.connect import PWCA, pixel_corr_mat
+from lib.models.connect import PWCA
 from lib.utils.utils import load_pretrain
 from tracking.coco_patches_loaderRemote import build_loader
 
@@ -37,129 +35,45 @@ from tracking.coco_patches_loaderRemote import build_loader
 # CONFIG  — edit here
 # =============================================================================
 
-CHECKPOINT   = "../snapshot/LightTrackM/LightTrackM.pth"
-TEMPLATE_DIR = "/workspace/data/coco_patches/template"
-SEARCH_DIR   = "/workspace/data/coco_patches/search"
-SAVE_DIR     = "snapshot/LightTrackM"
+CHECKPOINT    = "../snapshot/LightTrackM/LightTrackM.pth"
+TEMPLATE_DIR  = "/workspace/data/coco_patches/template"
+SEARCH_DIR    = "/workspace/data/coco_patches/search"
+SAVE_DIR      = "snapshot/LightTrackM"
 
 PATH_NAME     = "back_04502514044521042540+cls_211000022+reg_100000111_ops_32"
 SEARCH_SIZE   = 256
 TEMPLATE_SIZE = 128
 STRIDE        = 16
 ADJ_CHANNEL   = 128
-EMBED_DIM     = 96    # backbone output channels at DP stage
-NUM_KERNEL    = 64    # hz*wz = 8*8 = correlation output channels
-SEARCH_NUM    = 256   # hx*wx = 16*16
+EMBED_DIM     = 96
+NUM_KERNEL    = 64
+SEARCH_NUM    = 256
 
 EPOCHS        = 20
 BATCH_SIZE    = 256
-LR            = 1e-3
+LR            = 1e-4   # lower than before — towers are pretrained
 NUM_WORKERS   = 24
-LOG_INTERVAL  = 10    # steps between loss prints
+LOG_INTERVAL  = 10     # steps between liveloss updates
 
 # =============================================================================
-# TEACHER
+# BUILD
 # =============================================================================
 
-class TeacherNet(nn.Module):
-    """
-    Frozen teacher: backbone → neck → pixel_corr_mat cut.
-
-    Output: (B, 64, 16, 16) raw dot-product correlation, before CA.
-    All parameters frozen; always runs under torch.no_grad().
-    """
-
-    def __init__(self, backbone: nn.Module, neck: nn.Module):
-        super().__init__()
-        self.backbone = backbone
-        self.neck = neck
-
-    def forward(self, z: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-        zf = self.backbone(z)               # (B, 96,  8,  8)
-        xf = self.backbone(x)               # (B, 96, 16, 16)
-        zf_bn, xf_bn = self.neck(zf, xf)   # BN_adj — separate BN per branch
-        return pixel_corr_mat(zf_bn, xf_bn) # (B, 64, 16, 16)  ← cut point
-
-
-def build_teacher(checkpoint: str) -> TeacherNet:
-    """
-    Load pretrained LightTrackM_Speed, extract backbone + neck, freeze everything.
-    Returns a TeacherNet ready for inference.
-    """
-    base = LightTrackM_Speed(
+def build_base() -> LightTrackM_Speed:
+    model = LightTrackM_Speed(
         path_name=PATH_NAME,
         search_size=SEARCH_SIZE,
         template_size=TEMPLATE_SIZE,
         stride=STRIDE,
         adj_channel=ADJ_CHANNEL,
     )
-    load_pretrain(base, checkpoint, print_unuse=False)
+    load_pretrain(model, CHECKPOINT, print_unuse=False)
+    return model
 
-    teacher = TeacherNet(
-        backbone=base.features,
-        neck=base.neck,
-    )
-    teacher.eval()
-    for p in teacher.parameters():
+
+def freeze(module: nn.Module):
+    for p in module.parameters():
         p.requires_grad_(False)
-
-    return teacher
-
-
-# =============================================================================
-# STUDENT
-# =============================================================================
-
-class StudentNet(nn.Module):
-    """
-    Trainable student: receives pre-computed (zf_bn, xf_bn) from the teacher's
-    frozen backbone+neck, runs xattn correlation, returns features at the cut
-    point — after the final 128→64 contraction in post_dw, before CA.
-
-    Channel flow:
-        zf_bn: (B, 96,  8,  8) — K/V
-        xf_bn: (B, 96, 16, 16) — Q
-        → MHA out:   (B, 256, 96)
-        → reshape:   (B,  96, 16, 16)
-        → chan_proj:  (B,  64, 16, 16)   [Conv2d 96→64]
-        → post_dw[0]: DW + PW(64→128) + PW(128→64)
-        → post_dw[1]: DW + PW(64→128) + PW(128→64)  ← cut here
-    """
-
-    def __init__(self, pwca: PWCA):
-        super().__init__()
-        self.p = pwca
-
-    def forward(self, zf_bn: torch.Tensor, xf_bn: torch.Tensor) -> torch.Tensor:
-        p = self.p
-        b, c, hz, wz = zf_bn.size()
-        hx, wx = xf_bn.size(2), xf_bn.size(3)
-
-        x_seq = xf_bn.flatten(2).permute(0, 2, 1)              # (B, 256, 96)  Q
-        z_seq = zf_bn.flatten(2).permute(0, 2, 1)              # (B,  64, 96)  K/V
-
-        mha_out = p.mha(
-            p.q_proj(x_seq),
-            p.k_proj(z_seq),
-            p.v_proj(z_seq),
-        )[0]                                                    # (B, 256, 96)
-
-        corr = mha_out.permute(0, 2, 1).reshape(b, -1, hx, wx) # (B, 96, 16, 16)
-        corr = p.chan_proj(corr)                                 # (B, 64, 16, 16)
-        corr = p.post_dw(corr)                                  # (B, 64, 16, 16) ← cut
-        return corr
-
-
-def build_student() -> StudentNet:
-    """Fresh PWCA(xattn) wrapped in StudentNet. All parameters trainable."""
-    pwca = PWCA(
-        num_channel=NUM_KERNEL,
-        CA=True,          # CA is built but not called at the cut point
-        corr_type="xattn",
-        embed_dim=EMBED_DIM,
-        search_num=SEARCH_NUM,
-    )
-    return StudentNet(pwca)
 
 
 # =============================================================================
@@ -173,10 +87,26 @@ def train():
     loader = build_loader(BATCH_SIZE, NUM_WORKERS, template_dir=TEMPLATE_DIR, search_dir=SEARCH_DIR)
     print(f"Dataset: {len(loader.dataset)} pairs, {len(loader)} batches/epoch")
 
-    teacher = build_teacher(CHECKPOINT).to(device)
-    student = build_student().to(device)
+    # --- teacher: full pretrained model, everything frozen ---
+    teacher = build_base().to(device).eval()
+    freeze(teacher)
 
-    trainable = list(student.parameters())
+    # --- student: same pretrained weights, swap pw_corr to xattn ---
+    student = build_base().to(device)
+    student.feature_fusor.pw_corr = PWCA(
+        num_channel=NUM_KERNEL,
+        CA=True,
+        corr_type="xattn",
+        embed_dim=EMBED_DIM,
+        search_num=SEARCH_NUM,
+    ).to(device)
+
+    # freeze backbone + neck — only feature_fusor and head train
+    freeze(student.features)
+    freeze(student.neck)
+    student.train()
+
+    trainable = [p for p in student.parameters() if p.requires_grad]
     print(f"Trainable params: {sum(p.numel() for p in trainable):,}")
 
     optimizer = torch.optim.Adam(trainable, lr=LR, weight_decay=1e-4)
@@ -187,12 +117,15 @@ def train():
     )
 
     os.makedirs(SAVE_DIR, exist_ok=True)
-
     liveloss = PlotLosses()
 
     epoch_bar = tqdm(range(1, EPOCHS + 1), desc="Epochs")
     for epoch in epoch_bar:
         student.train()
+        # keep frozen parts in eval mode so BN stats don't drift
+        student.features.eval()
+        student.neck.eval()
+
         epoch_loss = 0.0
 
         step_bar = tqdm(loader, desc=f"Epoch {epoch}/{EPOCHS}", leave=False)
@@ -200,14 +133,25 @@ def train():
             z_batch = z_batch.to(device)
             x_batch = x_batch.to(device)
 
+            # shared backbone+neck forward — no grad, computed once
             with torch.no_grad():
-                zf = teacher.backbone(z_batch)
-                xf = teacher.backbone(x_batch)
-                zf_bn, xf_bn = teacher.neck(zf, xf)
-                teacher_out = pixel_corr_mat(zf_bn, xf_bn)
+                zf = student.features(z_batch)
+                xf = student.features(x_batch)
+                zf_bn, xf_bn = student.neck(zf, xf)
 
-            student_out = student(zf_bn, xf_bn)
-            loss = F.mse_loss(student_out, teacher_out)
+                # teacher output
+                t_feat = teacher.feature_fusor(zf_bn, xf_bn)
+                t_out  = teacher.head(t_feat)
+                t_cls  = t_out["cls"]   # (B, 1, 16, 16)
+                t_reg  = t_out["reg"]   # (B, 4, 16, 16)
+
+            # student output (feature_fusor + head have grad)
+            s_feat = student.feature_fusor(zf_bn, xf_bn)
+            s_out  = student.head(s_feat)
+            s_cls  = s_out["cls"]
+            s_reg  = s_out["reg"]
+
+            loss = F.mse_loss(s_cls, t_cls) + F.mse_loss(s_reg, t_reg)
 
             optimizer.zero_grad()
             loss.backward()
@@ -229,8 +173,10 @@ def train():
                 liveloss.send()
 
         avg_loss = epoch_loss / len(loader)
+
+        # save full student state dict so towers + fusor are captured together
         ckpt_path = os.path.join(SAVE_DIR, f"xattn_epoch{epoch:03d}.pth")
-        torch.save(student.p.state_dict(), ckpt_path)
+        torch.save(student.state_dict(), ckpt_path)
 
         epoch_bar.set_postfix(avg_loss=f"{avg_loss:.6f}")
 
