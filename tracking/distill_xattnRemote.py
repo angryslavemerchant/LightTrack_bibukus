@@ -141,17 +141,13 @@ def train():
 
                 # teacher output
                 t_feat = teacher.feature_fusor(zf_bn, xf_bn)
-                t_out  = teacher.head(t_feat)
-                t_cls  = t_out["cls"]   # (B, 1, 16, 16)
-                t_reg  = t_out["reg"]   # (B, 4, 16, 16)
+                t_cls  = teacher.head(t_feat)["cls"]   # (B, 1, 16, 16)
 
             # student output (feature_fusor + head have grad)
             s_feat = student.feature_fusor(zf_bn, xf_bn)
-            s_out  = student.head(s_feat)
-            s_cls  = s_out["cls"]
-            s_reg  = s_out["reg"]
+            s_cls  = student.head(s_feat)["cls"]
 
-            loss = F.mse_loss(s_cls, t_cls) + F.mse_loss(s_reg, t_reg)
+            loss = F.mse_loss(s_cls, t_cls)
 
             optimizer.zero_grad()
             loss.backward()
