@@ -69,4 +69,5 @@ def build_loader(
         num_workers=num_workers,
         pin_memory=True,
         drop_last=True,
+        persistent_workers=True,  # keeps workers alive between epochs
     )

@@ -52,7 +52,7 @@ SEARCH_NUM    = 256
 EPOCHS        = 20
 BATCH_SIZE    = 256
 LR            = 1e-4   # lower than before — towers are pretrained
-NUM_WORKERS   = 24
+NUM_WORKERS   = 8
 LOG_INTERVAL  = 10     # steps between liveloss updates
 
 # =============================================================================
