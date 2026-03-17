@@ -31,7 +31,7 @@ def simplify_model(input_path: str, output_path: str) -> None:
 if __name__ == "__main__":
 
 
-    input_path  = "../snapshot/LightTrackM/LightTrack_Toast.onnx"
-    output_path = "../snapshot/lightTrackM/lighttrack_ToastS.onnx"
+    input_path  = "../snapshot/LightTrackM/lighttrack_xattn.onnx"
+    output_path = "../snapshot/lightTrackM/lighttrack_cerberus.onnx"
 
     simplify_model(input_path, output_path)
